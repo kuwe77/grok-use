@@ -16,8 +16,9 @@ If MCP tools are missing this session, call that CLI the same way.
 2. `grok_use_list_windows` and pick the exact `pid` + `window_id`.
 3. `grok_use_capture` every turn before an element-index action. Read `screenshot_path` with the file tool. Ground on both the image and `elements[]`.
 4. Act:
-   - Prefer `grok_use_click` with `element_index` from the latest capture.
-   - If the control is canvas / ignored by AX, click `x,y` in **screenshot pixels**.
+   - Prefer `grok_use_click` with `element_index` from the latest capture (AX press, no cursor move).
+   - If the control is canvas / ignored by AX, click `x,y` in **screenshot pixels** (hit-test AX first; mouse events restore the real cursor).
+   - `grok_use_type` is AX-only. If it fails, do not try to "just type" — that steals the user keyboard.
    - Always stay in the background. Never pass `delivery_mode=foreground`. The helper ignores it anyway.
    - To move a dropdown/list, use `grok_use_scroll` with `direction=down` and `x,y` on the open menu (screenshot pixels), or `grok_use_press_key` `down` / `pagedown` after the menu is focused.
    - If the UI does not change, recapture and try the other background address (AX vs pixels). Do not raise the app or steal the user's keyboard.

@@ -96,7 +96,7 @@ TOOLS = [
     },
     {
         "name": "grok_use_type",
-        "description": "Insert text into a field of the target pid via AX, else unicode events posted only to that pid. Never raises the app or uses the user's keyboard stream.",
+        "description": "Insert text via Accessibility only (AXValue / AXSelectedText). Does not synthesize keystrokes, so the user keyboard is never hijacked. Fails if the field has no AX value.",
         "inputSchema": {
             "type": "object",
             "properties": {

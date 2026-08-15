@@ -470,7 +470,13 @@ func screenshotToScreen(x: Double, y: Double, imageW: Double, imageH: Double, bo
 }
 
 func privateSource() -> CGEventSource? {
-    CGEventSource(stateID: .privateState)
+    let src = CGEventSource(stateID: .privateState)
+    src?.setLocalEventsFilterDuringSuppressionState(
+        [.permitLocalMouseEvents, .permitLocalKeyboardEvents],
+        state: .eventSuppressionStateSuppressionInterval
+    )
+    src?.localEventsSuppressionInterval = 0
+    return src
 }
 
 func coerceBackground(_ requested: String) -> (String, Bool) {
@@ -480,13 +486,43 @@ func coerceBackground(_ requested: String) -> (String, Bool) {
     return (requested.isEmpty ? "background" : requested, false)
 }
 
+func quartzCursor() -> CGPoint {
+    CGEvent(source: nil)?.location ?? .zero
+}
+
+func restoreCursor(_ point: CGPoint) {
+    CGWarpMouseCursorPosition(point)
+    CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
+}
+
+/// Mouse/scroll CGEvents still warp the hardware cursor on recent macOS
+/// even when posted to a pid. Always put it back.
+func withRestoredCursor(_ body: () -> Void) {
+    let saved = quartzCursor()
+    body()
+    restoreCursor(saved)
+}
+
+func axHitTest(pid: Int, point: CGPoint) -> AXUIElement? {
+    let app = AXUIElementCreateApplication(pid_t(pid))
+    var ref: AXUIElement?
+    let err = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &ref)
+    return err == .success ? ref : nil
+}
+
+func axPress(_ el: AXUIElement) -> AXError {
+    AXUIElementPerformAction(el, kAXPressAction as CFString)
+}
+
 func postClick(pid: Int, point: CGPoint) {
-    let src = privateSource()
-    let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
-    let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
-    down?.postToPid(pid_t(pid))
-    usleep(12_000)
-    up?.postToPid(pid_t(pid))
+    withRestoredCursor {
+        let src = privateSource()
+        let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left)
+        let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left)
+        down?.postToPid(pid_t(pid))
+        usleep(12_000)
+        up?.postToPid(pid_t(pid))
+    }
 }
 
 func cmdClick() {
@@ -507,10 +543,25 @@ func cmdClick() {
     let imageW = (snap?["screenshot_width"] as? Int).map(Double.init) ?? win.bounds.width
     let imageH = (snap?["screenshot_height"] as? Int).map(Double.init) ?? win.bounds.height
     let pt = screenshotToScreen(x: x, y: y, imageW: imageW, imageH: imageH, bounds: win.bounds)
+
+    if let el = axHitTest(pid: pid, point: pt) {
+        let err = axPress(el)
+        emit([
+            "ok": err == .success,
+            "route": "ax_hit_test",
+            "delivery_mode": mode,
+            "steal_refused": stoleRefused,
+            "point": ["x": pt.x, "y": pt.y],
+            "ax_error": Int(err.rawValue),
+            "effect": err == .success ? "unverifiable" : "failed",
+        ])
+        return
+    }
+
     postClick(pid: pid, point: pt)
     emit([
         "ok": true,
-        "route": "cgevent_pid",
+        "route": "cgevent_pid_cursor_restored",
         "delivery_mode": mode,
         "steal_refused": stoleRefused,
         "point": ["x": pt.x, "y": pt.y],
@@ -638,16 +689,16 @@ func cmdType() {
     if !axOK {
         axOK = axSetSelectedText(pid: pid, text: text)
     }
-    if !axOK {
-        postUnicode(pid: pid, text: text)
-    }
+    // Do not synthesize keystrokes. CG keyboard events steal the user's
+    // key focus (and can land in the frontmost app if the target ignores them).
     emit([
-        "ok": true,
-        "route": axOK ? "ax_set_text" : "cgevent_pid_unicode",
+        "ok": axOK,
+        "route": axOK ? "ax_set_text" : "ax_unavailable",
         "delivery_mode": "background",
         "steal_refused": stoleRefused,
         "chars": text.count,
-        "effect": axOK ? "confirmed" : "unverifiable",
+        "effect": axOK ? "confirmed" : "failed",
+        "error": axOK ? NSNull() : "no AX text field; refusing key synthesis so the user keyboard is not hijacked",
     ])
 }
 
@@ -731,7 +782,9 @@ func cmdScroll() {
         wheel3: 0
     ) else { die("failed to create scroll event") }
     if let pt { event.location = pt }
-    event.postToPid(pid_t(pid))
+    withRestoredCursor {
+        event.postToPid(pid_t(pid))
+    }
 
     emit([
         "ok": true,
@@ -743,6 +796,11 @@ func cmdScroll() {
         "point": pt.map { ["x": $0.x, "y": $0.y] } as Any,
         "effect": "unverifiable",
     ])
+}
+
+func cmdCursor() {
+    let p = quartzCursor()
+    emit(["ok": true, "x": p.x, "y": p.y])
 }
 
 func cmdDoctor() {
@@ -760,7 +818,7 @@ func usage() -> Never {
     fputs("""
     grok-use-helper — Grok Use native macOS driver
     commands:
-      permissions | grant | doctor
+      permissions | grant | doctor | cursor
       list-windows [--on-screen]
       capture --pid N --window-id N [--out PATH]
       ax-tree --pid N --window-id N
@@ -781,6 +839,7 @@ switch cmd {
 case "permissions": cmdPermissions()
 case "grant": cmdGrant()
 case "doctor": cmdDoctor()
+case "cursor": cmdCursor()
 case "list-windows": cmdListWindows()
 case "capture": cmdCapture()
 case "ax-tree": cmdAXTree()

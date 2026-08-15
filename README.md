@@ -32,16 +32,16 @@ You
 | **MCP** `mcp/server.py` | stdio tools Grok calls (`grok_use_*`) |
 | **Helper** `Sources/main.swift` | Lists windows, walks AX, posts input |
 
-Input is either:
+Input, in order:
 
-- **AX** — `AXPress` / set `AXValue` on a named control
-- **Process events** — `CGEventPostToPid` with a **private** event source
+1. **AX** — `AXPress` or set `AXValue`. Pixel clicks hit-test the AX element at that point and press it. No cursor move.
+2. **Process events** — only if there is no AX target. `CGEventPostToPid` plus **restore the real cursor** immediately. Type never synthesizes keystrokes (that steals the user’s keyboard).
 
 The helper **never**:
 
 - activates or raises the target app
 - posts to the session HID tap (`.cghidEventTap`)
-- warps the real cursor
+- leaves the real cursor on the target window
 
 `delivery_mode=foreground` is accepted so old agents do not crash, then **ignored** (`steal_refused: true`).
 
