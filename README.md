@@ -34,8 +34,9 @@ You
 
 Input, in order:
 
-1. **AX** — `AXPress` or set `AXValue`. Pixel clicks hit-test the AX element at that point and press it. No cursor move.
-2. **Process events** — only if there is no AX target. `CGEventPostToPid` plus **restore the real cursor** immediately. Type never synthesizes keystrokes (that steals the user’s keyboard).
+1. **AX** — `AXPress` on buttons, or set `AXValue` on a field **without focusing it**. Pixel clicks hit-test first. Text fields are never AXPressed (that would make them the key window, so your keyboard would follow).
+2. **Process events** — only if there is no AX target. `CGEventPostToPid`, then restore the real cursor **and** the previous frontmost app if the target stole it.
+3. **Type** requires `element_index` and only writes AXValue. No key synthesis.
 
 The helper **never**:
 

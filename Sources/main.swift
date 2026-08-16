@@ -503,6 +503,30 @@ func withRestoredCursor(_ body: () -> Void) {
     restoreCursor(saved)
 }
 
+let textRoles: Set<String> = [
+    "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXSecureTextField",
+]
+
+/// Codex/Cua isolation: never leave the target as the key app.
+/// AXPress on a field makes that window first responder, so the user's
+/// physical keyboard follows it. After every mutation, if we stole
+/// frontmost, give it back immediately.
+func withIsolatedTarget(pid: Int, _ body: () -> Void) -> Bool {
+    let previous = NSWorkspace.shared.frontmostApplication
+    let savedCursor = quartzCursor()
+    body()
+    var restored = false
+    let now = NSWorkspace.shared.frontmostApplication
+    if now?.processIdentifier == pid_t(pid),
+       let previous,
+       previous.processIdentifier != pid_t(pid) {
+        previous.activate()
+        restored = true
+    }
+    restoreCursor(savedCursor)
+    return restored
+}
+
 func axHitTest(pid: Int, point: CGPoint) -> AXUIElement? {
     let app = AXUIElementCreateApplication(pid_t(pid))
     var ref: AXUIElement?
@@ -545,12 +569,27 @@ func cmdClick() {
     let pt = screenshotToScreen(x: x, y: y, imageW: imageW, imageH: imageH, bounds: win.bounds)
 
     if let el = axHitTest(pid: pid, point: pt) {
-        let err = axPress(el)
+        let role = axRole(el)
+        if textRoles.contains(role) {
+            emit([
+                "ok": true,
+                "route": "ax_text_no_focus",
+                "delivery_mode": mode,
+                "steal_refused": stoleRefused,
+                "point": ["x": pt.x, "y": pt.y],
+                "note": "text field: skipped AXPress so it does not steal the user key window; type via element_index",
+                "effect": "unverifiable",
+            ])
+            return
+        }
+        var err: AXError = .success
+        let focusRestored = withIsolatedTarget(pid: pid) { err = axPress(el) }
         emit([
             "ok": err == .success,
             "route": "ax_hit_test",
             "delivery_mode": mode,
             "steal_refused": stoleRefused,
+            "focus_restored": focusRestored,
             "point": ["x": pt.x, "y": pt.y],
             "ax_error": Int(err.rawValue),
             "effect": err == .success ? "unverifiable" : "failed",
@@ -558,12 +597,13 @@ func cmdClick() {
         return
     }
 
-    postClick(pid: pid, point: pt)
+    let focusRestored = withIsolatedTarget(pid: pid) { postClick(pid: pid, point: pt) }
     emit([
         "ok": true,
         "route": "cgevent_pid_cursor_restored",
         "delivery_mode": mode,
         "steal_refused": stoleRefused,
+        "focus_restored": focusRestored,
         "point": ["x": pt.x, "y": pt.y],
         "effect": "unverifiable",
     ])
@@ -581,12 +621,27 @@ func cmdAXPress(pid: Int, windowID: Int, index: Int, stoleRefused: Bool) {
     let els = rebuildElements(pid: pid, windowID: windowID)
     guard index >= 0, index < els.count else { die("element_index out of range", extra: ["index": index, "count": els.count]) }
     let el = els[index]
-    let err = AXUIElementPerformAction(el, kAXPressAction as CFString)
+    let role = axRole(el)
+    if textRoles.contains(role) {
+        emit([
+            "ok": true,
+            "route": "ax_text_no_focus",
+            "delivery_mode": "background",
+            "steal_refused": stoleRefused,
+            "element_index": index,
+            "note": "text field: skipped AXPress so it does not steal the user key window; type via element_index",
+            "effect": "unverifiable",
+        ])
+        return
+    }
+    var err: AXError = .success
+    let focusRestored = withIsolatedTarget(pid: pid) { err = AXUIElementPerformAction(el, kAXPressAction as CFString) }
     emit([
         "ok": err == .success,
         "route": "ax_press",
         "delivery_mode": "background",
         "steal_refused": stoleRefused,
+        "focus_restored": focusRestored,
         "element_index": index,
         "ax_error": Int(err.rawValue),
         "effect": err == .success ? "unverifiable" : "failed",
@@ -678,27 +733,35 @@ func cmdType() {
     let pid = requireInt("pid")
     let text = requireArg("text")
     let (_, stoleRefused) = coerceBackground(argValue("mode") ?? "background")
+    // Only write AXValue on an explicit element. Never focus it, never
+    // write the app's current focused field (that is the user-steal path).
+    guard let idx = intArg("index") else {
+        emit([
+            "ok": false,
+            "route": "ax_unavailable",
+            "delivery_mode": "background",
+            "steal_refused": stoleRefused,
+            "error": "type requires --index so we do not focus a field or hijack the user keyboard",
+        ])
+        return
+    }
+    let windowID = requireInt("window-id")
+    let els = rebuildElements(pid: pid, windowID: windowID)
+    guard idx >= 0, idx < els.count else {
+        die("element_index out of range", extra: ["index": idx, "count": els.count])
+    }
     var axOK = false
-    if let idx = intArg("index") {
-        let windowID = requireInt("window-id")
-        let els = rebuildElements(pid: pid, windowID: windowID)
-        if idx >= 0 && idx < els.count {
-            axOK = axSetText(el: els[idx], text: text)
-        }
-    }
-    if !axOK {
-        axOK = axSetSelectedText(pid: pid, text: text)
-    }
-    // Do not synthesize keystrokes. CG keyboard events steal the user's
-    // key focus (and can land in the frontmost app if the target ignores them).
+    let focusRestored = withIsolatedTarget(pid: pid) { axOK = axSetText(el: els[idx], text: text) }
     emit([
         "ok": axOK,
         "route": axOK ? "ax_set_text" : "ax_unavailable",
         "delivery_mode": "background",
         "steal_refused": stoleRefused,
+        "focus_restored": focusRestored,
+        "element_index": idx,
         "chars": text.count,
         "effect": axOK ? "confirmed" : "failed",
-        "error": axOK ? NSNull() : "no AX text field; refusing key synthesis so the user keyboard is not hijacked",
+        "error": axOK ? NSNull() : "AX set-value failed; refusing key synthesis so the user keyboard is not hijacked",
     ])
 }
 
@@ -710,12 +773,15 @@ func cmdHotkey() {
     let parts = raw.split(separator: "+").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
     guard let key = parts.last else { die("empty --keys") }
     let mods = Array(parts.dropLast())
-    postKey(pid: pid, key: key, flags: flagsFrom(mods))
+    let focusRestored = withIsolatedTarget(pid: pid) {
+        postKey(pid: pid, key: key, flags: flagsFrom(mods))
+    }
     emit([
         "ok": true,
         "route": "cgevent_pid_hotkey",
         "delivery_mode": "background",
         "steal_refused": stoleRefused,
+        "focus_restored": focusRestored,
         "keys": parts,
         "effect": "unverifiable",
     ])
@@ -726,12 +792,15 @@ func cmdPressKey() {
     let pid = requireInt("pid")
     let key = requireArg("key")
     let (_, stoleRefused) = coerceBackground(argValue("mode") ?? "background")
-    postKey(pid: pid, key: key, flags: [])
+    let focusRestored = withIsolatedTarget(pid: pid) {
+        postKey(pid: pid, key: key, flags: [])
+    }
     emit([
         "ok": true,
         "route": "cgevent_pid_key",
         "delivery_mode": "background",
         "steal_refused": stoleRefused,
+        "focus_restored": focusRestored,
         "key": key,
         "effect": "unverifiable",
     ])
@@ -782,7 +851,7 @@ func cmdScroll() {
         wheel3: 0
     ) else { die("failed to create scroll event") }
     if let pt { event.location = pt }
-    withRestoredCursor {
+    let focusRestored = withIsolatedTarget(pid: pid) {
         event.postToPid(pid_t(pid))
     }
 
@@ -791,6 +860,7 @@ func cmdScroll() {
         "route": "cgevent_pid_scroll",
         "delivery_mode": "background",
         "steal_refused": stoleRefused,
+        "focus_restored": focusRestored,
         "direction": direction,
         "amount": amount,
         "point": pt.map { ["x": $0.x, "y": $0.y] } as Any,
